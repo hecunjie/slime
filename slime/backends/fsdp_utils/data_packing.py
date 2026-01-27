@@ -176,6 +176,8 @@ def unpack_sequences(packed_batch: dict) -> list[dict]:
                     elif key == "rollout_log_probs":
                         # rollout_log_probs is packed based on response_lengths, so slice differently
                         instance[key] = value[sum(response_lengths[:i]) : sum(response_lengths[: i + 1])]
+                    elif key == "rewards":
+                        instance[key] = value[i]
                     elif key in ["tokens", "position_ids"]:
                         # For other tensor attributes, try to slice them
                         if len(value) > start_idx:

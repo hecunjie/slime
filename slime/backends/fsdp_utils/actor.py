@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+import math
 from argparse import Namespace
 from itertools import accumulate
 
@@ -667,7 +668,84 @@ class FSDPTrainRayActor(TrainRayActor):
                     kl_loss_type="low_var_kl",
                     importance_ratio=None,
                 )
-                distill_loss = sum_of_sample_mean(distill_kl, response_lengths, loss_masks)
+
+                if self.args.distill_top_entropy_ratio is not None:
+                    # Filter distillation loss to only top entropy tokens per sample
+                    
+                    # 1. Calculate entropy for EACH token (assuming cur_log_probs is log_probs from model)
+                    # We can use the already computed 'entropy' if it matches the current policy.
+                    # Current policy forward pass produces 'packed_batch["entropy"]' which is concatenated above.
+                    # 'entropy' variable (line 651) is already available.
+                    
+                    # It's safer to recalculate per-token entropy if we used packed computations
+                    # But here 'entropy' from line 651 is flat [total_tokens]
+                    
+                    # We need to process sample by sample to find top-k tokens based on entropy
+                    
+                    # Split flat tensors back to per-sample
+                    distill_kl_split = distill_kl.split(response_lengths, dim=0)
+                    entropy_split = entropy.detach().split(response_lengths, dim=0)
+                    loss_masks_split = loss_masks # Already a list of tensors
+                    
+                    filtered_distill_loss_list = []
+                    
+                    for kl_i, ent_i, mask_i in zip(distill_kl_split, entropy_split, loss_masks_split, strict=False):
+                        # Mask out padding/invalid tokens first
+                        valid_mask = (mask_i > 0)
+                        valid_kv_i = kl_i[valid_mask]
+                        valid_ent_i = ent_i[valid_mask]
+                        
+                        if valid_kv_i.numel() == 0:
+                            filtered_distill_loss_list.append(torch.tensor(0.0, device=kl_i.device))
+                            continue
+
+                        # Determine k
+                        num_valid = valid_ent_i.numel()
+                        top_k = max(1, int(math.ceil(num_valid * self.args.distill_top_entropy_ratio)))
+                        
+                        # Find indices of top-k entropy tokens
+                        # topk returns values and indices
+                        _, top_indices = torch.topk(valid_ent_i, k=min(top_k, num_valid))
+                        
+                        # Select KL values for these indices
+                        selected_kl = valid_kv_i[top_indices]
+                        
+                        # Sum (or Mean) - consistent with sum_of_sample_mean which does sum / valid_count
+                        # Here we average over the valid tokens (or the whole sample?). 
+                        # sum_of_sample_mean implements: sum(x_valid) / sum(mask_valid)
+                        # So it is the mean over the valid sequence length.
+                        # If we filter, should we divide by top_k or original length?
+                        # Usually "mean over the selected tokens" or "mean over sequence but zero-out others"
+                        # Let's zero-out non-top-k tokens and use standard mean normalization (divide by full length)
+                        # This scales down the loss, which acts like a dynamic coefficient.
+                        # ALternatively, average only over selected tokens.
+                        # Re-reading "only add ... loss": imply masking.
+                        # If we assume standard RL mean-loss approach: 
+                        # loss = sum(loss_per_token * mask) / sum(mask)
+                        # New mask = mask AND (is_top_k_entropy)
+                        # loss = sum(loss_per_token * new_mask) / sum(mask)  <-- "Soft" selection, dilutes loss
+                        # OR
+                        # loss = sum(loss_per_token * new_mask) / sum(new_mask) <-- "Hard" selection, maintains magnitude
+                        
+                        # Given "entropy maximization", hard selection (mean of top-k) usually makes more sense to focus signal.
+                        # However, sum_of_sample_mean divides by ALL valid tokens.
+                        # To keep consistent with `sum_of_sample_mean` usage where we return a single tensor `distill_loss` 
+                        # which is SUM of per-sample means.
+                        
+                        # Implementation: Calculate sum of selected KL, divide by total valid tokens (to keep scale consistent with other losses if they are token-averaged vs sample-averaged)
+                        # Actually standard practice often just masks the loss tensor.
+                        
+                        # Let's use the standard normalization (divide by total response length) to avoid large variance when k is small.
+                        # So: sum(selected_kl) / num_valid
+                        
+                        mean_kl_i = selected_kl.sum() / torch.clamp_min(torch.tensor(num_valid, device=kl_i.device), 1.0)
+                        filtered_distill_loss_list.append(mean_kl_i)
+                        
+                    distill_loss = torch.stack(filtered_distill_loss_list).sum()
+
+                else:
+                    distill_loss = sum_of_sample_mean(distill_kl, response_lengths, loss_masks)
+                
                 loss = loss + self.args.distill_coef * distill_loss
                 reported["distill_loss"] = distill_loss.detach()
 
@@ -693,6 +771,19 @@ class FSDPTrainRayActor(TrainRayActor):
             "ppo_kl": ppo_kl.detach(),
             "entropy_loss": entropy_loss.detach(),
         }
+
+        if "distill_loss" in locals():
+            reported["distill_loss"] = distill_loss.detach()
+
+        # Add train/reward
+        rewards = torch.cat([batch["rewards"] for batch in unpacked_batches], dim=0)
+        rewards = rewards.to(device=loss.device)
+        # rewards is per sample. Mean over batch.
+        # But this function handles micro-batches.
+        # So we report sum for this micro-batch, and later divide by global batch size.
+        # rewards from packed_batch is per sample.
+        # We need to sum them up.
+        reported["reward"] = rewards.sum().detach()
 
         if train_rollout_logprob_abs_diff is not None:
             reported["train_rollout_logprob_abs_diff"] = train_rollout_logprob_abs_diff
