@@ -130,6 +130,10 @@ class FSDPTrainRayActor(TrainRayActor):
         if with_ref:
             self.ref_model = self._create_ref_model(args.ref_load)
 
+        self.distill_model = None
+        if args.distill_checkpoint:
+            self.distill_model = self._create_ref_model(args.distill_checkpoint)
+
         self.weight_updater = (
             UpdateWeightFromTensor(self.args, self.model)
             if self.args.colocate
@@ -326,6 +330,14 @@ class FSDPTrainRayActor(TrainRayActor):
 
             active_model = self.ref_model
             active_model.eval()
+        elif model_tag == "distill" and self.distill_model is not None:
+            if not self.fsdp_cpu_offload:
+                self.model.cpu()
+                torch.cuda.empty_cache()
+                dist.barrier(group=get_gloo_group())
+
+            active_model = self.distill_model
+            active_model.eval()
         else:
             active_model = self.model
 
@@ -350,7 +362,9 @@ class FSDPTrainRayActor(TrainRayActor):
 
         finally:
             # Restore actor model if it was offloaded
-            if model_tag == "ref" and self.ref_model is not None:
+            if (model_tag == "ref" and self.ref_model is not None) or (
+                model_tag == "distill" and self.distill_model is not None
+            ):
                 torch.cuda.empty_cache()
                 dist.barrier(group=get_gloo_group())
 
@@ -510,6 +524,9 @@ class FSDPTrainRayActor(TrainRayActor):
         if self.ref_model is not None:
             self._compute_log_prob("ref", packed_batches, store_prefix="ref_")
 
+        if self.distill_model is not None:
+            self._compute_log_prob("distill", packed_batches, store_prefix="distill_")
+
         self._compute_log_prob("actor", packed_batches)
         self._log_rollout_data(rollout_id, rollout_data, packed_batches)
 
@@ -530,7 +547,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=rollout_data)
 
-        # Update ref model if needed (copy actor weights to ref)
+        # Update ref model if needed (copy actor weights to ref model)
         if (
             self.args.ref_update_interval is not None
             and (rollout_id + 1) % self.args.ref_update_interval == 0
@@ -635,6 +652,24 @@ class FSDPTrainRayActor(TrainRayActor):
         entropy_loss = sum_of_sample_mean(entropy, response_lengths, loss_masks)
 
         loss = pg_loss - self.args.entropy_coef * entropy_loss
+
+        if self.args.distill_checkpoint and self.args.distill_coef > 0:
+            if all([batch.get("distill_log_probs") is not None for batch in unpacked_batches]):
+                distill_log_probs = torch.cat(
+                    [batch["distill_log_probs"] for batch in unpacked_batches], dim=0
+                ).to(device=log_probs.device)
+                
+                # Calculate Reversed KL (student || teacher)
+                # Using low_var_kl estimator: E[Q/P - 1 - log(Q/P)] = KL(P||Q)
+                distill_kl = compute_approx_kl(
+                    log_probs,
+                    distill_log_probs,
+                    kl_loss_type="low_var_kl",
+                    importance_ratio=None,
+                )
+                distill_loss = sum_of_sample_mean(distill_kl, response_lengths, loss_masks)
+                loss = loss + self.args.distill_coef * distill_loss
+                reported["distill_loss"] = distill_loss.detach()
 
         if self.args.use_kl_loss:
             ref_log_probs = torch.cat([batch["ref_log_probs"] for batch in unpacked_batches], dim=0)
