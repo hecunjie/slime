@@ -747,7 +747,6 @@ class FSDPTrainRayActor(TrainRayActor):
                     distill_loss = sum_of_sample_mean(distill_kl, response_lengths, loss_masks)
                 
                 loss = loss + self.args.distill_coef * distill_loss
-                reported["distill_loss"] = distill_loss.detach()
 
         if self.args.use_kl_loss:
             ref_log_probs = torch.cat([batch["ref_log_probs"] for batch in unpacked_batches], dim=0)
