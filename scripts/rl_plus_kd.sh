@@ -164,6 +164,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    "${DISTILL_ARGS[@]}" \
    "${WANDB_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
+   "${EVAL_ARGS[@]}" \
    "${TRAIN_BACKEND_ARGS[@]}" \
    "${PERF_ARGS[@]}" \
    "${MISC_ARGS[@]}"
