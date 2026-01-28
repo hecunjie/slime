@@ -139,8 +139,10 @@ class RolloutManager:
         return self._split_train_data_by_dp(data, self.train_parallel_config["dp_size"])
 
     def eval(self, rollout_id):
+        logger.info(f"RolloutManager: Starting evaluation for rollout_id {rollout_id}")
         if self.args.debug_train_only:
             # if debug train only, we don't generate evaluation data
+            logger.info("RolloutManager: debug_train_only is True, skipping evaluation")
             return
         self.health_monitoring_resume()
 

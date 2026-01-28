@@ -176,6 +176,8 @@ def get_lr_scheduler(args, optimizer: torch.optim.Optimizer) -> FSDPLRScheduler:
         wsd_decay_steps = args.lr_wsd_decay_iters
     if args.lr_warmup_fraction is not None:
         lr_warmup_steps = args.lr_warmup_fraction * lr_decay_steps
+    elif getattr(args, "warmup_ratio", None) is not None:
+        lr_warmup_steps = args.warmup_ratio * lr_decay_steps
     else:
         lr_warmup_steps = args.lr_warmup_iters
     lr_scheduler = FSDPLRScheduler(
