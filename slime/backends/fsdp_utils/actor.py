@@ -129,11 +129,11 @@ class FSDPTrainRayActor(TrainRayActor):
         # Create separate ref model if needed (kept in CPU until needed)
         self.ref_model = None
         if with_ref:
-            self.ref_model = self._create_ref_model(args.ref_load)
+            self.ref_model = self._create_ref_model(args.ref_load, role="ref")
 
         self.distill_model = None
         if args.distill_checkpoint:
-            self.distill_model = self._create_ref_model(args.distill_checkpoint)
+            self.distill_model = self._create_ref_model(args.distill_checkpoint, role="distill")
 
         self.weight_updater = (
             UpdateWeightFromTensor(self.args, self.model)
@@ -153,9 +153,12 @@ class FSDPTrainRayActor(TrainRayActor):
 
         return int(getattr(self.args, "start_rollout_id", 0))
 
-    def get_model_cls(self):
+    def get_model_cls(self, config=None):
+        # Use provided config or fallback to self.hf_config
+        target_config = config if config is not None else self.hf_config
+        
         # Vision models have `vision_config` in the config
-        if hasattr(self.hf_config, "vision_config"):
+        if hasattr(target_config, "vision_config"):
             from transformers import AutoModelForImageTextToText
 
             return AutoModelForImageTextToText
@@ -201,7 +204,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         logger.info(f"[Rank {rank}] Device mesh (1D): world_size={world_size}, dp_size={self.dp_size}")
 
-    def _get_init_weight_context_manager(self):
+    def _get_init_weight_context_manager(self, config=None):
         """Get context manager for model initialization.
 
         Returns a callable that creates a context manager.
@@ -213,8 +216,10 @@ class FSDPTrainRayActor(TrainRayActor):
         """
         from accelerate import init_empty_weights
 
+        target_config = config if config is not None else self.hf_config
+
         # Check if model uses tied word embeddings (which doesn't work with meta tensors)
-        use_meta_tensor = not self.hf_config.tie_word_embeddings
+        use_meta_tensor = not target_config.tie_word_embeddings
 
         def cpu_init_weights():
             return torch.device("cpu")
@@ -775,8 +780,7 @@ class FSDPTrainRayActor(TrainRayActor):
             reported["distill_loss"] = distill_loss.detach()
 
         # Add train/reward
-        rewards = torch.cat([batch["rewards"] for batch in unpacked_batches], dim=0)
-        rewards = rewards.to(device=loss.device)
+        rewards = torch.tensor([batch["rewards"] for batch in unpacked_batches], device=loss.device)
         # rewards is per sample. Mean over batch.
         # But this function handles micro-batches.
         # So we report sum for this micro-batch, and later divide by global batch size.
@@ -872,12 +876,13 @@ class FSDPTrainRayActor(TrainRayActor):
 
         clear_memory()
 
-    def _create_ref_model(self, ref_load_path: str | None):
+    def _create_ref_model(self, ref_load_path: str | None, role: str = "ref"):
         """Create and initialize a separate reference model with FSDP2 CPUOffloadPolicy.
 
         Parameters:
             ref_load_path: Path to a directory containing a HF checkpoint. If
                 None, a ValueError is raised.
+            role: The role of the model (e.g. "ref", "distill"). Used for logging.
 
         Returns:
             FSDP2-wrapped ref model with CPU offload enabled
@@ -888,18 +893,22 @@ class FSDPTrainRayActor(TrainRayActor):
             regardless of the actor model's CPU offload setting.
         """
         if ref_load_path is None:
-            raise ValueError("ref_load_path must be provided when loading reference model")
+            raise ValueError(f"{role}_load_path must be provided when loading {role} model")
 
         if os.path.isdir(ref_load_path):
-            logger.info(f"[Rank {dist.get_rank()}] Creating separate ref model from {ref_load_path}")
-
-            init_context = self._get_init_weight_context_manager()
+            logger.info(f"[Rank {dist.get_rank()}] Creating separate {role} model from {ref_load_path}")
+            
+            # Load config first to correctly determine init context and model class
+            ref_config = AutoConfig.from_pretrained(ref_load_path, trust_remote_code=True)
+            
+            init_context = self._get_init_weight_context_manager(config=ref_config)
 
             with init_context():
-                ref_model = self.get_model_cls().from_pretrained(
+                ref_model = self.get_model_cls(config=ref_config).from_pretrained(
                     ref_load_path,
                     trust_remote_code=True,
                     attn_implementation=self.args.attn_implementation,
+                    config=ref_config, # Pass loaded config to avoid reloading
                 )
 
             full_state = ref_model.state_dict()
@@ -908,7 +917,7 @@ class FSDPTrainRayActor(TrainRayActor):
             ref_model = apply_fsdp2(ref_model, mesh=self.dp_mesh, cpu_offload=True, args=self.args)
             ref_model = self._fsdp2_load_full_state_dict(ref_model, full_state, self.dp_mesh, cpu_offload=True)
 
-            logger.info(f"[Rank {dist.get_rank()}] Reference model created with FSDP2 CPUOffloadPolicy")
+            logger.info(f"[Rank {dist.get_rank()}] {role.capitalize()} model created with FSDP2 CPUOffloadPolicy")
             return ref_model
         else:
             raise NotImplementedError(f"Loading from checkpoint file {ref_load_path} not yet implemented")
