@@ -679,9 +679,15 @@ def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any]
             return
 
     log_dict = extra_metrics or {}
+    all_rewards = []
     for key in data.keys():
         rewards = data[key]["rewards"]
-        log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
+        all_rewards.extend(rewards)
+        avg_reward = sum(rewards) / len(rewards)
+        log_dict[f"eval/{key}"] = avg_reward
+        log_dict[f"eval/{key}/avg_reward"] = avg_reward
+        log_dict[f"eval/{key}/accuracy"] = avg_reward
+
         if (samples := data[key].get("samples")) is not None:
             log_dict |= dict_add_prefix(compute_metrics_from_samples(args, samples), f"eval/{key}/")
         if "truncated" in data[key]:
@@ -695,6 +701,11 @@ def _log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any]
                 ),
                 f"eval/{key}-",
             )
+
+    if all_rewards:
+        overall_avg_reward = sum(all_rewards) / len(all_rewards)
+        log_dict["eval/avg_reward"] = overall_avg_reward
+        log_dict["eval/accuracy"] = overall_avg_reward
 
     logger.info(f"eval {rollout_id}: {log_dict}")
 

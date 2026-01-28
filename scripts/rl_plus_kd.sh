@@ -37,10 +37,10 @@ RUN_ID=${RUN_ID:-"run_$(date +%Y%m%d_%H%M%S)"}
 LOAD_SAVE_PATH="/root/shared_data/${RUN_ID}/checkpoints"
 
 CKPT_ARGS=(
-   --hf-checkpoint /mnt/tidal-alsh01/dataset/zeus/hecunjie/models/Qwen/Qwen3-4B-base
+   --hf-checkpoint /mnt/tidal-alsh01/dataset/zeus/hecunjie/models/Qwen/Qwen3-4B
    #--hf-checkpoint /root/Qwen3-4B-FP8
-   --ref-load /mnt/tidal-alsh01/dataset/zeus/hecunjie/models/Qwen/Qwen3-4B-base
-   --load /mnt/tidal-alsh01/dataset/zeus/hecunjie/models/Qwen/Qwen3-4B-base
+   --ref-load /mnt/tidal-alsh01/dataset/zeus/hecunjie/models/Qwen/Qwen3-4B
+   --load /mnt/tidal-alsh01/dataset/zeus/hecunjie/models/Qwen/Qwen3-4B
    --save /mnt/tidal-alsh01/dataset/zeus/hecunjie/train_outputs/slime_kd_plus_rl_test
    --save-interval 50
 )
@@ -95,6 +95,7 @@ OPTIMIZER_ARGS=(
    --optimizer adam
    --lr 1e-6
    --lr-decay-style cosine
+   --warmup-ratio 0.1
    --weight-decay 0.1
    --adam-beta1 0.9
    --adam-beta2 0.98
@@ -112,7 +113,7 @@ else
 fi
 
 SGLANG_ARGS=(
-   --rollout-num-gpus-per-engine 2
+   --rollout-num-gpus-per-engine 1
    --sglang-mem-fraction-static 0.75
    --sglang-decode-log-interval 1000
    --sglang-chunked-prefill-size 4096
