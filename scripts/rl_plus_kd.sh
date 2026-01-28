@@ -53,12 +53,12 @@ ROLLOUT_ARGS=(
    --rollout-shuffle
    --rm-type deepscaler
    # --num-rollout 3000
-   --num-epoch 5
-   --rollout-batch-size 4
+   --num-epoch 3
+   --rollout-batch-size 8
    --n-samples-per-prompt 8
    --rollout-max-response-len 8192
    --rollout-temperature 1
-   --global-batch-size 32
+   --global-batch-size 64
    --balance-data
 )
 
