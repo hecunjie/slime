@@ -54,7 +54,7 @@ ROLLOUT_ARGS=(
    --rm-type deepscaler
    # --num-rollout 3000
    --num-epoch 5
-   --rollout-batch-size 8
+   --rollout-batch-size 4
    --n-samples-per-prompt 8
    --rollout-max-response-len 8192
    --rollout-temperature 1
@@ -114,7 +114,7 @@ fi
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 2
    --sglang-mem-fraction-static 0.75
-   --sglang-decode-log-interval 1000a
+   --sglang-decode-log-interval 1000
    --sglang-chunked-prefill-size 4096
    --sglang-attention-backend fa3
 )
@@ -161,6 +161,7 @@ ray job submit --address="http://127.0.0.1:8265" \
    "${ROLLOUT_ARGS[@]}" \
    "${OPTIMIZER_ARGS[@]}" \
    "${GRPO_ARGS[@]}" \
+   "${DISTILL_ARGS[@]}" \
    "${WANDB_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
    "${TRAIN_BACKEND_ARGS[@]}" \
