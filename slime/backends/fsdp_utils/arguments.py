@@ -55,6 +55,10 @@ class FSDPArgs:
     profile_step_end: int = 12
     tensorboard_dir: str | None = None
 
+    # Debug/Analysis
+    dump_generation: bool = True
+    get_entropy_from_distill_model: bool = False
+
     # YAML bookkeeping
     config: str | None = None
 

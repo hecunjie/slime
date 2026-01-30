@@ -168,7 +168,7 @@ def unpack_sequences(packed_batch: dict) -> list[dict]:
                                 instance[key][mm_key] = mm_tensor[start_mm_idx:end_mm_idx]
                 # For tensor attributes, we need to slice them appropriately
                 elif isinstance(value, torch.Tensor):
-                    if key in ["log_probs", "ref_log_probs", "distill_log_probs", "cur_log_probs", "entropy"]:
+                    if key in ["log_probs", "ref_log_probs", "distill_log_probs", "cur_log_probs", "entropy", "distill_cur_log_probs", "distill_cur_entropy", "distill_entropy"]:
                         # These are computed from logits[:-1] so they have length seq_len-1
                         instance[key] = value[
                             end_idx - 1 - response_lengths[i] - pad_length : end_idx - 1 - pad_length

@@ -141,6 +141,12 @@ MISC_ARGS=(
    # --fsdp-cpu-offload
 )
 
+# New Debug Args
+DEBUG_ARGS=(
+   --dump-generation
+   --get-entropy-from-distill-model
+)
+
 # launch the master node of ray in container - 8 GPUs for training
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus 8 --disable-usage-stats
@@ -162,12 +168,14 @@ ray job submit --address="http://127.0.0.1:8265" \
    "${OPTIMIZER_ARGS[@]}" \
    "${GRPO_ARGS[@]}" \
    "${DISTILL_ARGS[@]}" \
+   "${DEBUG_ARGS[@]}" \
    "${WANDB_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
    "${EVAL_ARGS[@]}" \
    "${TRAIN_BACKEND_ARGS[@]}" \
    "${PERF_ARGS[@]}" \
-   "${MISC_ARGS[@]}"
+   "${MISC_ARGS[@]}" \
+   "${DEBUG_ARGS[@]}"
 
 
 

@@ -2,6 +2,9 @@ import logging
 import os
 import random
 import math
+import json
+import csv
+import threading
 from argparse import Namespace
 from itertools import accumulate
 
@@ -581,7 +584,62 @@ class FSDPTrainRayActor(TrainRayActor):
         packed_batch["cur_log_probs"] = log_probs
         packed_batch["entropy"] = entropy_result
 
+        if getattr(self.args, "get_entropy_from_distill_model", False) and self.distill_model is not None:
+            # We must use torch.no_grad() to avoid OOM or gradient computation for distill model
+            with torch.no_grad():
+                distill_logits = self.distill_model(**model_args).logits.squeeze(0).float()
+                d_log_probs, d_entropy = get_logprob_and_entropy(
+                    logits=distill_logits,
+                    target_tokens=packed_batch["tokens"],
+                    allow_compile=not self.args.true_on_policy_mode,
+                    temperature=self.args.rollout_temperature,
+                )
+                packed_batch["distill_cur_log_probs"] = d_log_probs
+                packed_batch["distill_cur_entropy"] = d_entropy
+
         unpacked_batches = unpack_sequences(packed_batch)
+
+        if getattr(self.args, "get_entropy_from_distill_model", False):
+            # Capture only metrics data
+            metrics_data_to_save = []
+            for i, batch in enumerate(unpacked_batches):
+                # Generate a unique ID for this sample
+                # Structure: step_rank_mbs_idx_indexInBatch
+                gen_id = f"{self.global_step}_{dist.get_rank()}_{mbs_id}_{i}"
+                item = {
+                    "id": gen_id,
+                    "tokens": batch["tokens"].cpu(), # Needed for token text in CSV
+                    "actor_cur_log_probs": batch["cur_log_probs"].cpu(),
+                    "actor_entropy": batch["entropy"].cpu(),
+                }
+                if "distill_cur_log_probs" in batch:
+                    item["distill_cur_log_probs"] = batch["distill_cur_log_probs"].cpu()
+                    item["distill_cur_entropy"] = batch["distill_cur_entropy"].cpu()
+                metrics_data_to_save.append(item)
+            threading.Thread(target=self._async_save_token_metrics, args=(self.global_step, metrics_data_to_save, mbs_id)).start()
+
+        if getattr(self.args, "dump_generation", True):
+            # Capture rollout data
+            rollout_data_to_save = []
+            for i, batch in enumerate(unpacked_batches):
+                gen_id = f"{self.global_step}_{dist.get_rank()}_{mbs_id}_{i}"
+                item = {
+                    "id": gen_id,
+                    "tokens": batch["tokens"].cpu(),
+                    "response_len": batch.get("response_lengths", 0), # It is an int
+                    "reward": batch.get("rewards", 0.0),
+                    "raw_reward": batch.get("raw_reward", 0.0)
+                }
+                # Convert tensor scalar to float for safety in thread? .item()
+                if torch.is_tensor(item["reward"]):
+                    item["reward"] = item["reward"].item()
+                # raw_reward is usually float, but just in case
+                if torch.is_tensor(item["raw_reward"]):
+                    item["raw_reward"] = item["raw_reward"].item()
+                
+                rollout_data_to_save.append(item)
+            threading.Thread(target=self._async_save_rollout_data, args=(self.global_step, rollout_data_to_save, mbs_id)).start()
+
 
         old_log_prob_key = "rollout_log_probs" if self.args.use_rollout_logprobs else "log_probs"
         missing_old_log_probs = [
@@ -715,33 +773,6 @@ class FSDPTrainRayActor(TrainRayActor):
                         # Select KL values for these indices
                         selected_kl = valid_kv_i[top_indices]
                         
-                        # Sum (or Mean) - consistent with sum_of_sample_mean which does sum / valid_count
-                        # Here we average over the valid tokens (or the whole sample?). 
-                        # sum_of_sample_mean implements: sum(x_valid) / sum(mask_valid)
-                        # So it is the mean over the valid sequence length.
-                        # If we filter, should we divide by top_k or original length?
-                        # Usually "mean over the selected tokens" or "mean over sequence but zero-out others"
-                        # Let's zero-out non-top-k tokens and use standard mean normalization (divide by full length)
-                        # This scales down the loss, which acts like a dynamic coefficient.
-                        # ALternatively, average only over selected tokens.
-                        # Re-reading "only add ... loss": imply masking.
-                        # If we assume standard RL mean-loss approach: 
-                        # loss = sum(loss_per_token * mask) / sum(mask)
-                        # New mask = mask AND (is_top_k_entropy)
-                        # loss = sum(loss_per_token * new_mask) / sum(mask)  <-- "Soft" selection, dilutes loss
-                        # OR
-                        # loss = sum(loss_per_token * new_mask) / sum(new_mask) <-- "Hard" selection, maintains magnitude
-                        
-                        # Given "entropy maximization", hard selection (mean of top-k) usually makes more sense to focus signal.
-                        # However, sum_of_sample_mean divides by ALL valid tokens.
-                        # To keep consistent with `sum_of_sample_mean` usage where we return a single tensor `distill_loss` 
-                        # which is SUM of per-sample means.
-                        
-                        # Implementation: Calculate sum of selected KL, divide by total valid tokens (to keep scale consistent with other losses if they are token-averaged vs sample-averaged)
-                        # Actually standard practice often just masks the loss tensor.
-                        
-                        # Let's use the standard normalization (divide by total response length) to avoid large variance when k is small.
-                        # So: sum(selected_kl) / num_valid
                         
                         mean_kl_i = selected_kl.sum() / torch.clamp_min(torch.tensor(num_valid, device=kl_i.device), 1.0)
                         filtered_distill_loss_list.append(mean_kl_i)
@@ -775,6 +806,24 @@ class FSDPTrainRayActor(TrainRayActor):
             "ppo_kl": ppo_kl.detach(),
             "entropy_loss": entropy_loss.detach(),
         }
+
+        if getattr(self.args, "get_entropy_from_distill_model", False) and self.distill_model is not None:
+            distill_cur_log_probs = torch.cat(
+                [batch["distill_cur_log_probs"] for batch in unpacked_batches], dim=0
+            ).to(device=log_probs.device)
+            distill_cur_entropy = torch.cat(
+                [batch["distill_cur_entropy"] for batch in unpacked_batches], dim=0
+            ).to(device=log_probs.device)
+
+            reported["distill_log_probs"] = sum_of_sample_mean(
+                distill_cur_log_probs, response_lengths, loss_masks
+            ).detach()
+            reported["distill_entropy"] = sum_of_sample_mean(
+                distill_cur_entropy, response_lengths, loss_masks
+            ).detach()
+            reported["actor_log_probs"] = sum_of_sample_mean(
+                log_probs, response_lengths, loss_masks
+            ).detach()
 
         if "distill_loss" in locals():
             reported["distill_loss"] = distill_loss.detach()
@@ -1115,3 +1164,71 @@ def sum_of_token(x: torch.Tensor, response_lengths: list[int], loss_masks: list[
             for x_i, loss_mask_i in zip(x.split(response_lengths, dim=0), loss_masks, strict=False)
         ]
     )
+
+    def _async_save_rollout_data(self, step, data_list, mbs_idx, save_dir_root="reward_model"):
+        """Async save input, response, rollout and reward for each rollout."""
+        save_dir = os.path.join(save_dir_root, f"step_{step}")
+        os.makedirs(save_dir, exist_ok=True)
+        rank = dist.get_rank()
+        jsonl_path = os.path.join(save_dir, f"rollout_rank{rank}_mbs{mbs_idx}.jsonl")
+        
+        with open(jsonl_path, "a", encoding="utf-8") as f_json:
+            for item in data_list:
+                tokens = item["tokens"].tolist()
+                text = self.tokenizer.decode(tokens, skip_special_tokens=False)
+                
+                resp_len = item.get("response_len", 0)
+                input_tokens = tokens[:-resp_len] if resp_len > 0 else tokens
+                response_tokens = tokens[-resp_len:] if resp_len > 0 else []
+                
+                input_text = self.tokenizer.decode(input_tokens, skip_special_tokens=False)
+                response_text = self.tokenizer.decode(response_tokens, skip_special_tokens=False)
+                
+                record = {
+                    "id": item["id"],
+                    "step": step,
+                    "rollout": text,
+                    "input": input_text,
+                    "response": response_text,
+                    "reward": item.get("reward", 0.0),
+                    "raw_reward": item.get("raw_reward", 0.0)
+                }
+                f_json.write(json.dumps(record) + "\n")
+
+    def _async_save_token_metrics(self, step, data_list, mbs_idx, save_dir_root="reward_model"):
+        """Async save per-token entropy and log_probs for actor and distill models."""
+        save_dir = os.path.join(save_dir_root, f"step_{step}")
+        os.makedirs(save_dir, exist_ok=True)
+        rank = dist.get_rank()
+        csv_path = os.path.join(save_dir, f"metrics_rank{rank}_mbs{mbs_idx}.csv")
+
+        with open(csv_path, "a", newline="", encoding="utf-8") as f_csv:
+            csv_writer = csv.writer(f_csv)
+            if os.path.getsize(csv_path) == 0:
+                csv_writer.writerow(["id", "sample_idx", "token_idx", "token", "actor_log_prob", "actor_entropy", "distill_log_prob", "distill_entropy"])
+
+            for item_idx, item in enumerate(data_list):
+                gen_id = item["id"]
+                tokens = item["tokens"].tolist()
+                
+                a_lp = item["actor_cur_log_probs"]
+                a_ent = item["actor_entropy"]
+                d_lp = item.get("distill_cur_log_probs")
+                d_ent = item.get("distill_cur_entropy")
+                
+                # Align tokens with response
+                resp_len = a_lp.size(0)
+                resp_tokens = tokens[-resp_len:] # assuming tokens is full sequence
+                
+                for t_i in range(resp_len):
+                    row = [
+                        gen_id,
+                        item_idx,
+                        t_i,
+                        resp_tokens[t_i],
+                        a_lp[t_i].item(),
+                        a_ent[t_i].item(),
+                        d_lp[t_i].item() if d_lp is not None else 0.0,
+                        d_ent[t_i].item() if d_ent is not None else 0.0
+                    ]
+                    csv_writer.writerow(row)
