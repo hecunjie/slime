@@ -983,6 +983,76 @@ class FSDPTrainRayActor(TrainRayActor):
         if packed_sequence.get("multimodal_train_inputs"):
             model_args.update(packed_sequence["multimodal_train_inputs"])
         return model_args
+    
+    
+    def _async_save_rollout_data(self, step, data_list, mbs_idx, save_dir_root="reward_model"):
+        """Async save input, response, rollout and reward for each rollout."""
+        save_dir = os.path.join(save_dir_root, f"step_{step}")
+        os.makedirs(save_dir, exist_ok=True)
+        rank = dist.get_rank()
+        jsonl_path = os.path.join(save_dir, f"rollout_rank{rank}_mbs{mbs_idx}.jsonl")
+        
+        with open(jsonl_path, "a", encoding="utf-8") as f_json:
+            for item in data_list:
+                tokens = item["tokens"].tolist()
+                text = self.tokenizer.decode(tokens, skip_special_tokens=False)
+                
+                resp_len = item.get("response_len", 0)
+                input_tokens = tokens[:-resp_len] if resp_len > 0 else tokens
+                response_tokens = tokens[-resp_len:] if resp_len > 0 else []
+                
+                input_text = self.tokenizer.decode(input_tokens, skip_special_tokens=False)
+                response_text = self.tokenizer.decode(response_tokens, skip_special_tokens=False)
+                
+                record = {
+                    "id": item["id"],
+                    "step": step,
+                    "rollout": text,
+                    "input": input_text,
+                    "response": response_text,
+                    "reward": item.get("reward", 0.0),
+                    "raw_reward": item.get("raw_reward", 0.0)
+                }
+                f_json.write(json.dumps(record) + "\n")
+
+    def _async_save_token_metrics(self, step, data_list, mbs_idx, save_dir_root="reward_model"):
+        """Async save per-token entropy and log_probs for actor and distill models."""
+        save_dir = os.path.join(save_dir_root, f"step_{step}")
+        os.makedirs(save_dir, exist_ok=True)
+        rank = dist.get_rank()
+        csv_path = os.path.join(save_dir, f"metrics_rank{rank}_mbs{mbs_idx}.csv")
+
+        with open(csv_path, "a", newline="", encoding="utf-8") as f_csv:
+            csv_writer = csv.writer(f_csv)
+            if os.path.getsize(csv_path) == 0:
+                csv_writer.writerow(["id", "sample_idx", "token_idx", "token", "actor_log_prob", "actor_entropy", "distill_log_prob", "distill_entropy"])
+
+            for item_idx, item in enumerate(data_list):
+                gen_id = item["id"]
+                tokens = item["tokens"].tolist()
+                
+                a_lp = item["actor_cur_log_probs"]
+                a_ent = item["actor_entropy"]
+                d_lp = item.get("distill_cur_log_probs")
+                d_ent = item.get("distill_cur_entropy")
+                
+                # Align tokens with response
+                resp_len = a_lp.size(0)
+                resp_tokens = tokens[-resp_len:] # assuming tokens is full sequence
+                
+                for t_i in range(resp_len):
+                    row = [
+                        gen_id,
+                        item_idx,
+                        t_i,
+                        resp_tokens[t_i],
+                        a_lp[t_i].item(),
+                        a_ent[t_i].item(),
+                        d_lp[t_i].item() if d_lp is not None else 0.0,
+                        d_ent[t_i].item() if d_ent is not None else 0.0
+                    ]
+                    csv_writer.writerow(row)
+
 
 
 def selective_log_softmax_raw(logits: torch.Tensor, input_ids: torch.Tensor) -> torch.Tensor:
@@ -1164,71 +1234,3 @@ def sum_of_token(x: torch.Tensor, response_lengths: list[int], loss_masks: list[
             for x_i, loss_mask_i in zip(x.split(response_lengths, dim=0), loss_masks, strict=False)
         ]
     )
-
-    def _async_save_rollout_data(self, step, data_list, mbs_idx, save_dir_root="reward_model"):
-        """Async save input, response, rollout and reward for each rollout."""
-        save_dir = os.path.join(save_dir_root, f"step_{step}")
-        os.makedirs(save_dir, exist_ok=True)
-        rank = dist.get_rank()
-        jsonl_path = os.path.join(save_dir, f"rollout_rank{rank}_mbs{mbs_idx}.jsonl")
-        
-        with open(jsonl_path, "a", encoding="utf-8") as f_json:
-            for item in data_list:
-                tokens = item["tokens"].tolist()
-                text = self.tokenizer.decode(tokens, skip_special_tokens=False)
-                
-                resp_len = item.get("response_len", 0)
-                input_tokens = tokens[:-resp_len] if resp_len > 0 else tokens
-                response_tokens = tokens[-resp_len:] if resp_len > 0 else []
-                
-                input_text = self.tokenizer.decode(input_tokens, skip_special_tokens=False)
-                response_text = self.tokenizer.decode(response_tokens, skip_special_tokens=False)
-                
-                record = {
-                    "id": item["id"],
-                    "step": step,
-                    "rollout": text,
-                    "input": input_text,
-                    "response": response_text,
-                    "reward": item.get("reward", 0.0),
-                    "raw_reward": item.get("raw_reward", 0.0)
-                }
-                f_json.write(json.dumps(record) + "\n")
-
-    def _async_save_token_metrics(self, step, data_list, mbs_idx, save_dir_root="reward_model"):
-        """Async save per-token entropy and log_probs for actor and distill models."""
-        save_dir = os.path.join(save_dir_root, f"step_{step}")
-        os.makedirs(save_dir, exist_ok=True)
-        rank = dist.get_rank()
-        csv_path = os.path.join(save_dir, f"metrics_rank{rank}_mbs{mbs_idx}.csv")
-
-        with open(csv_path, "a", newline="", encoding="utf-8") as f_csv:
-            csv_writer = csv.writer(f_csv)
-            if os.path.getsize(csv_path) == 0:
-                csv_writer.writerow(["id", "sample_idx", "token_idx", "token", "actor_log_prob", "actor_entropy", "distill_log_prob", "distill_entropy"])
-
-            for item_idx, item in enumerate(data_list):
-                gen_id = item["id"]
-                tokens = item["tokens"].tolist()
-                
-                a_lp = item["actor_cur_log_probs"]
-                a_ent = item["actor_entropy"]
-                d_lp = item.get("distill_cur_log_probs")
-                d_ent = item.get("distill_cur_entropy")
-                
-                # Align tokens with response
-                resp_len = a_lp.size(0)
-                resp_tokens = tokens[-resp_len:] # assuming tokens is full sequence
-                
-                for t_i in range(resp_len):
-                    row = [
-                        gen_id,
-                        item_idx,
-                        t_i,
-                        resp_tokens[t_i],
-                        a_lp[t_i].item(),
-                        a_ent[t_i].item(),
-                        d_lp[t_i].item() if d_lp is not None else 0.0,
-                        d_ent[t_i].item() if d_ent is not None else 0.0
-                    ]
-                    csv_writer.writerow(row)
