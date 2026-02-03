@@ -1017,7 +1017,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     "reward": item.get("reward", 0.0),
                     "raw_reward": item.get("raw_reward", 0.0)
                 }
-                f_json.write(json.dumps(record) + "\n")
+                f_json.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     def _async_save_token_metrics(self, step, data_list, mbs_idx, save_dir_root="reward_model"):
         """Async save per-token entropy and log_probs for actor and distill models."""
