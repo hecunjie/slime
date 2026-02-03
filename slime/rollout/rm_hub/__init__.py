@@ -12,7 +12,7 @@ from .gpqa import compute_gpqa_reward
 from .math_dapo_utils import compute_score as compute_score_dapo
 from .math_utils import extract_answer as extract_boxed_answer
 from .math_utils import grade_answer_verl
-
+from .deepscaler_base import get_deepscaler_rule_based_reward_for_base_model
 
 async def remote_rm(args, sample: Sample):
     payload = {
@@ -58,6 +58,8 @@ async def async_rm(args, sample: Sample, **kwargs):
         from .ifbench import compute_ifbench_reward
 
         return compute_ifbench_reward(response, label, metadata=metadata)
+    elif rm_type == "deepscaler_base":
+        return get_deepscaler_rule_based_reward_for_base_model(response, label)
     elif rm_type == "random":
         return random.randint(0, 1)
     elif rm_type:

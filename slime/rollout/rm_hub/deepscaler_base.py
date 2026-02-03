@@ -1,7 +1,7 @@
 from .math_utils import extract_answer, grade_answer_mathd, grade_answer_sympy
 
 
-def get_deepscaler_rule_based_reward(response, label):
+def get_deepscaler_rule_based_reward_for_base_model(response, label):
 
     model_answer = extract_answer(response)
     if model_answer is None:
