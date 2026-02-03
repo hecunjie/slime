@@ -181,6 +181,7 @@ class Dataset:
         seed=42,
         apply_chat_template=False,
         apply_chat_template_kwargs=None,
+        prompt_suffix="",
     ):
         origin_samples = []
         for data in read_file(path):
@@ -209,6 +210,12 @@ class Dataset:
                 )
             else:
                 output_prompt = prompt
+
+            if prompt_suffix:
+                if isinstance(output_prompt, str):
+                    output_prompt += prompt_suffix
+                else:
+                    logger.warning("prompt_suffix is ignored because the prompt is not a string.")
 
             if processor:
                 from slime.utils.processing_utils import process_vision_info

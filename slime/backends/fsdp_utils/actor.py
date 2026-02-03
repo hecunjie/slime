@@ -601,7 +601,7 @@ class FSDPTrainRayActor(TrainRayActor):
 
         save_dir_root = "reward_model"
         if getattr(self.args, "save", None):
-             save_dir_root = os.path.join(os.path.dirname(self.args.save), "reward_model")
+             save_dir_root = os.path.join(self.args.save, "reward_model")
 
         if getattr(self.args, "get_entropy_from_distill_model", False):
             # Capture only metrics data
