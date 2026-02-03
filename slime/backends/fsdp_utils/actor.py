@@ -599,6 +599,10 @@ class FSDPTrainRayActor(TrainRayActor):
 
         unpacked_batches = unpack_sequences(packed_batch)
 
+        save_dir_root = "reward_model"
+        if getattr(self.args, "save", None):
+             save_dir_root = os.path.join(os.path.dirname(self.args.save), "reward_model")
+
         if getattr(self.args, "get_entropy_from_distill_model", False):
             # Capture only metrics data
             metrics_data_to_save = []
@@ -616,7 +620,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     item["distill_cur_log_probs"] = batch["distill_cur_log_probs"].cpu()
                     item["distill_cur_entropy"] = batch["distill_cur_entropy"].cpu()
                 metrics_data_to_save.append(item)
-            threading.Thread(target=self._async_save_token_metrics, args=(self.global_step, metrics_data_to_save, mbs_id)).start()
+            threading.Thread(target=self._async_save_token_metrics, args=(self.global_step, metrics_data_to_save, mbs_id, save_dir_root)).start()
 
         if getattr(self.args, "dump_generation", True):
             # Capture rollout data
@@ -638,7 +642,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     item["raw_reward"] = item["raw_reward"].item()
                 
                 rollout_data_to_save.append(item)
-            threading.Thread(target=self._async_save_rollout_data, args=(self.global_step, rollout_data_to_save, mbs_id)).start()
+            threading.Thread(target=self._async_save_rollout_data, args=(self.global_step, rollout_data_to_save, mbs_id, save_dir_root)).start()
 
 
         old_log_prob_key = "rollout_log_probs" if self.args.use_rollout_logprobs else "log_probs"
