@@ -837,6 +837,14 @@ def get_slime_extra_args_provider(add_custom_arguments=None):
                 default=None,
                 help="Ratio of top entropy tokens to apply distillation loss (e.g. 0.2 for top 20%).",
             )
+            parser.add_argument(
+                "--distill-only",
+                action="store_true",
+                default=False,
+                help="If True, use only distillation KL loss (no RL policy gradient loss). "
+                     "The KL is estimated with a simple single-point estimator (k1: log_ratio) "
+                     "instead of the low-variance estimator.",
+            )
             parser.add_argument("--normalize-advantages", action="store_true", default=False)
             parser.add_argument(
                 "--disable-grpo-std-normalization",

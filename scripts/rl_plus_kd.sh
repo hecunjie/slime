@@ -88,6 +88,7 @@ DISTILL_ARGS=(
    --distill-coef 0.3
    # Ratio of top entropy tokens to apply distillation loss (optional)
    --distill-top-entropy-ratio 0.2
+   --distill-only
 )
 
 OPTIMIZER_ARGS=(

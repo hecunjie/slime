@@ -719,40 +719,53 @@ class FSDPTrainRayActor(TrainRayActor):
         entropy = torch.cat([batch["entropy"] for batch in unpacked_batches], dim=0)
         entropy_loss = sum_of_sample_mean(entropy, response_lengths, loss_masks)
 
-        loss = pg_loss - self.args.entropy_coef * entropy_loss
+        distill_only = getattr(self.args, "distill_only", False)
+
+        if distill_only:
+            # In distill-only mode, skip RL loss entirely
+            loss = torch.tensor(0.0, device=log_probs.device)
+        else:
+            loss = pg_loss - self.args.entropy_coef * entropy_loss
 
         if self.args.distill_checkpoint and self.args.distill_coef > 0:
             if all([batch.get("distill_log_probs") is not None for batch in unpacked_batches]):
                 distill_log_probs = torch.cat(
                     [batch["distill_log_probs"] for batch in unpacked_batches], dim=0
                 ).to(device=log_probs.device)
-                
-                # Calculate Reversed KL (student || teacher)
-                # Using low_var_kl estimator: E[Q/P - 1 - log(Q/P)] = KL(P||Q)
-                distill_kl = compute_approx_kl(
-                    log_probs,
-                    distill_log_probs,
-                    kl_loss_type="low_var_kl",
-                    importance_ratio=None,
-                )
+
+                if distill_only:
+                    # Simple single-point KL estimator (k1): log(π_θ / π_teacher)
+                    # This directly estimates KL(π_θ || π_teacher) without the
+                    # low-variance correction (e^r - 1 - r).
+                    distill_kl = compute_approx_kl(
+                        log_probs,
+                        distill_log_probs,
+                        kl_loss_type="k1",
+                        importance_ratio=None,
+                    )
+                else:
+                    # Calculate Reversed KL (student || teacher)
+                    # Using low_var_kl estimator: E[Q/P - 1 - log(Q/P)] = KL(P||Q)
+                    # This is the Schulman non-negative, unbiased, lower-variance
+                    # KL approximation.
+                    distill_kl = compute_approx_kl(
+                        log_probs,
+                        distill_log_probs,
+                        kl_loss_type="low_var_kl",
+                        importance_ratio=None,
+                    )
 
                 if self.args.distill_top_entropy_ratio is not None:
-                    # Filter distillation loss to only top entropy tokens per sample
-                    
-                    # 1. Calculate entropy for EACH token (assuming cur_log_probs is log_probs from model)
-                    # We can use the already computed 'entropy' if it matches the current policy.
-                    # Current policy forward pass produces 'packed_batch["entropy"]' which is concatenated above.
-                    # 'entropy' variable (line 651) is already available.
-                    
-                    # It's safer to recalculate per-token entropy if we used packed computations
-                    # But here 'entropy' from line 651 is flat [total_tokens]
-                    
-                    # We need to process sample by sample to find top-k tokens based on entropy
+                    # Filter distillation loss to only top entropy tokens per sample.
+                    # The entropy used for selection is the "suffix-average" entropy:
+                    #   transformed_entropy[i] = mean(entropy[i], entropy[i+1], ..., entropy[n-1])
+                    # This captures the average uncertainty from position i to the end,
+                    # so earlier tokens with sustained high entropy are prioritized.
                     
                     # Split flat tensors back to per-sample
                     distill_kl_split = distill_kl.split(response_lengths, dim=0)
                     entropy_split = entropy.detach().split(response_lengths, dim=0)
-                    loss_masks_split = loss_masks # Already a list of tensors
+                    loss_masks_split = loss_masks  # Already a list of tensors
                     
                     filtered_distill_loss_list = []
                     
@@ -766,19 +779,24 @@ class FSDPTrainRayActor(TrainRayActor):
                             filtered_distill_loss_list.append(torch.tensor(0.0, device=kl_i.device))
                             continue
 
+                        # Transform entropy to suffix-average:
+                        # suffix_avg[i] = sum(ent[i:]) / (n - i)
+                        # Computed via reverse cumsum for efficiency.
+                        n = valid_ent_i.numel()
+                        reverse_cumsum = valid_ent_i.flip(0).cumsum(0).flip(0)
+                        suffix_counts = torch.arange(n, 0, -1, device=valid_ent_i.device, dtype=valid_ent_i.dtype)
+                        suffix_avg_ent = reverse_cumsum / suffix_counts
+
                         # Determine k
-                        num_valid = valid_ent_i.numel()
-                        top_k = max(1, int(math.ceil(num_valid * self.args.distill_top_entropy_ratio)))
+                        top_k = max(1, int(math.ceil(n * self.args.distill_top_entropy_ratio)))
                         
-                        # Find indices of top-k entropy tokens
-                        # topk returns values and indices
-                        _, top_indices = torch.topk(valid_ent_i, k=min(top_k, num_valid))
+                        # Find indices of top-k suffix-average entropy tokens
+                        _, top_indices = torch.topk(suffix_avg_ent, k=min(top_k, n))
                         
                         # Select KL values for these indices
                         selected_kl = valid_kv_i[top_indices]
                         
-                        
-                        mean_kl_i = selected_kl.sum() / torch.clamp_min(torch.tensor(num_valid, device=kl_i.device), 1.0)
+                        mean_kl_i = selected_kl.sum() / torch.clamp_min(torch.tensor(n, device=kl_i.device, dtype=kl_i.dtype), 1.0)
                         filtered_distill_loss_list.append(mean_kl_i)
                         
                     distill_loss = torch.stack(filtered_distill_loss_list).sum()
