@@ -575,16 +575,26 @@ class FSDPTrainRayActor(TrainRayActor):
         model_args = self._get_model_inputs_args(packed_batch)
         logits = self.model(**model_args).logits.squeeze(0).float()
 
-        # Compute log probs and entropy
+        # Compute log probs and entropy.
+        # When entropy_coef == 0, entropy does not participate in the loss and
+        # therefore does not need gradients.  We skip its computation here to
+        # avoid the ~4.7 GiB peak memory overhead of the [seq_len, vocab_size]
+        # softmax tensors.  The pre-computed (no-grad) entropy from
+        # _compute_log_prob("actor", ...) is already stored in packed_batch["entropy"]
+        # and will be reused for logging / distill_top_entropy_ratio selection.
+        need_entropy_grad = (self.args.entropy_coef != 0)
         log_probs, entropy_result = get_logprob_and_entropy(
             logits=logits,
             target_tokens=packed_batch["tokens"],
             allow_compile=not self.args.true_on_policy_mode,
             temperature=self.args.rollout_temperature,
+            compute_entropy=need_entropy_grad,
             entropy_chunk_size=256,  # Chunk to avoid OOM alongside actor activations
         )
         packed_batch["cur_log_probs"] = log_probs
-        packed_batch["entropy"] = entropy_result
+        if entropy_result is not None:
+            packed_batch["entropy"] = entropy_result
+        # else: keep the entropy already computed in _compute_log_prob("actor", ...)
         del logits  # Free [seq_len, vocab_size] tensor (~4.7 GiB) early
 
         if getattr(self.args, "get_entropy_from_distill_model", False) and self.distill_model is not None:
@@ -1141,8 +1151,9 @@ def get_logprob_and_entropy(
     target_tokens: torch.Tensor,
     allow_compile: bool,
     temperature: float | None = None,
+    compute_entropy: bool = True,
     entropy_chunk_size: int | None = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Compute log probabilities and entropy.
 
     Parameters:
@@ -1150,6 +1161,9 @@ def get_logprob_and_entropy(
         target_tokens: Target tokens with shape [seq_len]
         allow_compile: Whether to allow compilation
         temperature: Temperature parameter (optional)
+        compute_entropy: If False, skip entropy computation and return None
+            for entropy. Useful when entropy_coef == 0 to save ~4.7 GiB
+            peak GPU memory during the actor training forward pass.
         entropy_chunk_size: If set, compute entropy in chunks of this size
             along the sequence dimension to reduce peak GPU memory. Useful
             when called alongside other large tensors on the GPU (e.g.,
@@ -1157,12 +1171,15 @@ def get_logprob_and_entropy(
 
     Returns:
         log_probs: Log probabilities with shape [seq_len - 1]
-        entropy: Entropy with shape [seq_len - 1]
+        entropy: Entropy with shape [seq_len - 1], or None if compute_entropy=False
     """
     shifted_logits = logits[:-1, :]
     log_probs = gather_log_probs_packed(
         shifted_logits, target_tokens, allow_compile=allow_compile, temperature=temperature
     )
+
+    if not compute_entropy:
+        return log_probs, None
 
     if entropy_chunk_size is not None and entropy_chunk_size > 0:
         # Chunked entropy computation to reduce peak memory.
