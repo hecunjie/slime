@@ -593,6 +593,7 @@ class FSDPTrainRayActor(TrainRayActor):
                     target_tokens=packed_batch["tokens"],
                     allow_compile=not self.args.true_on_policy_mode,
                     temperature=self.args.rollout_temperature,
+                    entropy_chunk_size=256,  # Chunk to avoid OOM alongside actor activations
                 )
                 packed_batch["distill_cur_log_probs"] = d_log_probs
                 packed_batch["distill_cur_entropy"] = d_entropy
@@ -1136,6 +1137,7 @@ def get_logprob_and_entropy(
     target_tokens: torch.Tensor,
     allow_compile: bool,
     temperature: float | None = None,
+    entropy_chunk_size: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute log probabilities and entropy.
 
@@ -1144,6 +1146,10 @@ def get_logprob_and_entropy(
         target_tokens: Target tokens with shape [seq_len]
         allow_compile: Whether to allow compilation
         temperature: Temperature parameter (optional)
+        entropy_chunk_size: If set, compute entropy in chunks of this size
+            along the sequence dimension to reduce peak GPU memory. Useful
+            when called alongside other large tensors on the GPU (e.g.,
+            distill model forward during actor training).
 
     Returns:
         log_probs: Log probabilities with shape [seq_len - 1]
@@ -1153,9 +1159,23 @@ def get_logprob_and_entropy(
     log_probs = gather_log_probs_packed(
         shifted_logits, target_tokens, allow_compile=allow_compile, temperature=temperature
     )
-    log_probs_full = torch.log_softmax(shifted_logits, dim=-1)
-    probs = torch.softmax(shifted_logits, dim=-1)
-    entropy = -(probs * log_probs_full).sum(dim=-1)
+
+    if entropy_chunk_size is not None and entropy_chunk_size > 0:
+        # Chunked entropy computation to reduce peak memory.
+        # Instead of materializing two full [seq_len, vocab_size] tensors
+        # simultaneously, we process small chunks and only keep the
+        # per-token scalar entropy values.
+        entropy_chunks = []
+        for i in range(0, shifted_logits.shape[0], entropy_chunk_size):
+            chunk = shifted_logits[i : i + entropy_chunk_size]
+            chunk_log_probs = torch.log_softmax(chunk, dim=-1)
+            entropy_chunks.append(-(chunk_log_probs.exp() * chunk_log_probs).sum(dim=-1))
+        entropy = torch.cat(entropy_chunks, dim=0)
+    else:
+        log_probs_full = torch.log_softmax(shifted_logits, dim=-1)
+        probs = torch.softmax(shifted_logits, dim=-1)
+        entropy = -(probs * log_probs_full).sum(dim=-1)
+
     return log_probs, entropy
 
 
