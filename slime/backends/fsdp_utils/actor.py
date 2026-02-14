@@ -363,6 +363,7 @@ class FSDPTrainRayActor(TrainRayActor):
                         target_tokens=batch["tokens"],
                         allow_compile=not self.args.true_on_policy_mode,
                         temperature=self.args.rollout_temperature,
+                        entropy_chunk_size=256,  # Chunk to avoid OOM alongside actor activations
                     )
                     batch[f"{store_prefix}log_probs"] = log_probs_result
                     if store_prefix == "":
@@ -580,6 +581,7 @@ class FSDPTrainRayActor(TrainRayActor):
             target_tokens=packed_batch["tokens"],
             allow_compile=not self.args.true_on_policy_mode,
             temperature=self.args.rollout_temperature,
+            entropy_chunk_size=256,  # Chunk to avoid OOM alongside actor activations
         )
         packed_batch["cur_log_probs"] = log_probs
         packed_batch["entropy"] = entropy_result
