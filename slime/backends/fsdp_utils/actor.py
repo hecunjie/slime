@@ -583,6 +583,7 @@ class FSDPTrainRayActor(TrainRayActor):
         )
         packed_batch["cur_log_probs"] = log_probs
         packed_batch["entropy"] = entropy_result
+        del logits  # Free [seq_len, vocab_size] tensor (~4.7 GiB) early
 
         if getattr(self.args, "get_entropy_from_distill_model", False) and self.distill_model is not None:
             # We must use torch.no_grad() to avoid OOM or gradient computation for distill model
@@ -597,6 +598,7 @@ class FSDPTrainRayActor(TrainRayActor):
                 )
                 packed_batch["distill_cur_log_probs"] = d_log_probs
                 packed_batch["distill_cur_entropy"] = d_entropy
+                del distill_logits  # Free [seq_len, vocab_size] tensor (~4.7 GiB) early
 
         unpacked_batches = unpack_sequences(packed_batch)
 
