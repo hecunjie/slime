@@ -26,6 +26,7 @@ pip install cmake ninja
 # flash attn
 # the newest version megatron supports is v2.7.4.post1
 MAX_JOBS=64 pip -v install flash-attn==2.7.4.post1 --no-build-isolation
+# pip install https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.7.11/flash_attn-2.7.4%2Bcu129torch2.9-cp311-cp311-linux_x86_64.whl
 
 pip install git+https://github.com/ISEEKYAN/mbridge.git@89eb10887887bc74853f89a4de258c0702932a1c --no-deps
 pip install --no-build-isolation "transformer_engine[pytorch]==2.10.0"
